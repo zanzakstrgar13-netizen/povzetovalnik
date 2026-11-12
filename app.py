@@ -109,8 +109,9 @@ def preberi_zip(url):
 # ---------- AI ----------
 
 def naredi_povzetek(besedilo):
-    client = genai.Client()
+    client = genai.Client(http_options={"timeout": 90000})
     sporocilo = st.empty()
+    zadnja_napaka = None
 
     for model in MODELI:
         for poskus in range(1, 3):
@@ -119,10 +120,12 @@ def naredi_povzetek(besedilo):
                 odgovor = client.models.generate_content(model=model, contents=NAVODILO + besedilo)
                 sporocilo.empty()
                 return odgovor.text
-            except Exception:
+            except Exception as napaka:
+                zadnja_napaka = napaka
                 time.sleep(10)
 
     sporocilo.empty()
+    st.write("Zadnja napaka:", str(zadnja_napaka))
     return None
 
 
