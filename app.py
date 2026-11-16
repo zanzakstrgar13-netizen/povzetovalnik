@@ -16,6 +16,7 @@ load_dotenv()
 
 MODELI = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"]
 GLAVA = {"User-Agent": "Mozilla/5.0"}
+GLAVA_API = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 SLOVENSKI_CAS = ZoneInfo("Europe/Ljubljana")
 NAJVEC_VRSTIC_EXCEL = 300  # iz vsakega lista preberemo največ toliko vrstic
 
@@ -39,13 +40,13 @@ Dokumentacija:
 
 # ---------- Branje objave ----------
 
+@st.cache_data(ttl=600)
 def preberi_objavo(povezava):
     id_objave = povezava.strip().rstrip("/").split("/")[-1]
     if not id_objave.isdigit():
         return None
     url = "https://www.enarocanje.si/api/obrazec/objava/obrazecGet?id=" + id_objave
-    glava = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    odziv = requests.get(url, headers=glava, timeout=30)
+    odziv = requests.get(url, headers=GLAVA_API, timeout=30)
     odziv.raise_for_status()
     return odziv.json()
 
@@ -95,8 +96,7 @@ def poisci_razpise(beseda):
         "naslov": beseda,
     }
     url = "https://www.enarocanje.si/api/obrazec/objava/obrazecGetGrid"
-    glava = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    odziv = requests.post(url, json=telo, headers=glava, timeout=30)
+    odziv = requests.post(url, json=telo, headers=GLAVA_API, timeout=30)
     odziv.raise_for_status()
     return odziv.json()["data"]
 
@@ -152,6 +152,18 @@ def preberi_excel(datoteka):
     return besedilo
 
 
+def preberi_datoteko(ime, datoteka):
+    # Izbere pravo branje glede na končnico. Če vrste datoteke ne poznamo, vrne None.
+    malo = ime.lower()
+    if malo.endswith(".docx"):
+        return preberi_word(datoteka)
+    if malo.endswith(".pdf"):
+        return preberi_pdf(datoteka)
+    if malo.endswith(".xlsx") or malo.endswith(".xlsm"):
+        return preberi_excel(datoteka)
+    return None
+
+
 def preberi_zip(url):
     # Prenesi datoteko s portala
     odziv = requests.get(url, headers=GLAVA, timeout=60)
@@ -175,29 +187,22 @@ def preberi_zip(url):
     imena = [ime for ime in arhiv.namelist() if not ime.endswith("/")]
 
     # Imena Word datotek brez končnice, da prepoznamo dvojnike v PDF
-    wordi = set()
-    for ime in imena:
-        if ime.lower().endswith(".docx"):
-            wordi.add(ime.lower()[:-5])
+    wordi = {ime.lower()[:-5] for ime in imena if ime.lower().endswith(".docx")}
 
     for ime in imena:
-        malo = ime.lower()
+        if ime.lower().endswith(".pdf") and ime.lower()[:-4] in wordi:
+            continue  # isti dokument že imamo v Wordu, PDF preskočimo
+
         try:
-            if malo.endswith(".docx"):
-                besedilo += "\n\n=== " + ime + " ===\n" + preberi_word(io.BytesIO(arhiv.read(ime)))
-                prebrane.append(ime)
-            elif malo.endswith(".pdf"):
-                if malo[:-4] in wordi:
-                    continue  # isti dokument že imamo v Wordu, PDF preskočimo
-                besedilo += "\n\n=== " + ime + " ===\n" + preberi_pdf(io.BytesIO(arhiv.read(ime)))
-                prebrane.append(ime)
-            elif malo.endswith(".xlsx") or malo.endswith(".xlsm"):
-                besedilo += "\n\n=== " + ime + " ===\n" + preberi_excel(io.BytesIO(arhiv.read(ime)))
-                prebrane.append(ime)
-            else:
-                neprebrane.append(ime)  # npr. XML, slike, stari .xls
+            prebrano = preberi_datoteko(ime, io.BytesIO(arhiv.read(ime)))
         except Exception:
-            neprebrane.append(ime)  # datoteke se ni dalo prebrati
+            prebrano = None  # datoteke se ni dalo prebrati
+
+        if prebrano is None:
+            neprebrane.append(ime)  # npr. XML, slike, stari .xls ali poškodovana datoteka
+        else:
+            besedilo += "\n\n=== " + ime + " ===\n" + prebrano
+            prebrane.append(ime)
 
     return besedilo, prebrane, neprebrane
 
@@ -207,22 +212,56 @@ def preberi_zip(url):
 def naredi_povzetek(besedilo):
     client = genai.Client(http_options={"timeout": 90000})
     sporocilo = st.empty()
+    sporocilo.info("Priprava povzetka v teku ...")
     zadnja_napaka = None
 
+    # Vsak model poskusimo dvakrat, po vrsti
+    poskusi = []
     for model in MODELI:
-        for poskus in range(1, 3):
-            sporocilo.info("Priprava povzetka v teku ...")
-            try:
-                odgovor = client.models.generate_content(model=model, contents=NAVODILO + besedilo)
-                sporocilo.empty()
-                return odgovor.text
-            except Exception as napaka:
-                zadnja_napaka = napaka
-                time.sleep(10)
+        poskusi += [model, model]
+
+    for stevilka, model in enumerate(poskusi):
+        try:
+            odgovor = client.models.generate_content(model=model, contents=NAVODILO + besedilo)
+            sporocilo.empty()
+            return odgovor.text
+        except Exception as napaka:
+            zadnja_napaka = napaka
+            if stevilka < len(poskusi) - 1:
+                time.sleep(10)  # po zadnjem poskusu ne čakamo več
 
     sporocilo.empty()
     st.caption("Tehnične podrobnosti: " + str(zadnja_napaka))
     return None
+
+
+def pripravi_in_shrani(kljuc, besedilo, prebrane, neprebrane):
+    # Naredi povzetek in ga shrani v "spomin" strani, da ob naslednjem kliku ne izgine
+    povzetek = naredi_povzetek(besedilo)
+    if povzetek:
+        st.session_state["povzetki"][kljuc] = {
+            "povzetek": povzetek,
+            "prebrane": prebrane,
+            "neprebrane": neprebrane,
+        }
+    else:
+        # Povzetka ni, vseeno pa pokažemo, katere datoteke so bile prebrane
+        if neprebrane:
+            st.warning("Te datoteke niso bile prebrane, preglejte jih sami: " + ", ".join(neprebrane))
+        if prebrane:
+            st.write("**Prebrani dokumenti:**", ", ".join(prebrane))
+        st.error("Povzetka trenutno ni mogoče pripraviti. Poskusite znova čez nekaj minut.")
+
+
+def pokazi_povzetek(kljuc):
+    shranjeno = st.session_state["povzetki"].get(kljuc)
+    if shranjeno is None:
+        return
+    if shranjeno["neprebrane"]:
+        st.warning("Te datoteke niso bile prebrane, preglejte jih sami: " + ", ".join(shranjeno["neprebrane"]))
+    if shranjeno["prebrane"]:
+        st.write("**Prebrani dokumenti:**", ", ".join(shranjeno["prebrane"]))
+    st.markdown(shranjeno["povzetek"])
 
 
 # ---------- Izgled strani ----------
@@ -234,6 +273,8 @@ if "povezava" not in st.session_state:
     st.session_state["povezava"] = ""
 if "beseda" not in st.session_state:
     st.session_state["beseda"] = ""
+if "povzetki" not in st.session_state:
+    st.session_state["povzetki"] = {}
 st.session_state["beseda"] = st.session_state["beseda"]  # da si stran zapomni iskano besedo
 
 if st.session_state["povezava"] == "":
@@ -284,7 +325,7 @@ if povezava:
 
         if not url_dokumentacije:
             st.warning("Dokumentacija ni objavljena na portalu. Naložite jo ročno spodaj.")
-        elif st.button("Pripravi povzetek dokumentacije"):
+        elif povezava not in st.session_state["povzetki"] and st.button("Pripravi povzetek dokumentacije"):
             with st.spinner("Prenos in branje dokumentacije v teku ..."):
                 try:
                     besedilo, prebrane, neprebrane = preberi_zip(url_dokumentacije)
@@ -292,36 +333,24 @@ if povezava:
                     st.write("Podrobnosti napake:", str(napaka))
                     besedilo, prebrane, neprebrane = "", [], []
 
-            if neprebrane:
-                st.warning("Te datoteke niso bile prebrane, preglejte jih sami: " + ", ".join(neprebrane))
-
             if not besedilo.strip():
                 st.error("Dokumentacije ni bilo mogoče prebrati. Prenesite jo ročno in jo naložite spodaj.")
             else:
-                st.write("**Prebrani dokumenti:**", ", ".join(prebrane))
-                povzetek = naredi_povzetek(besedilo)
-                if povzetek:
-                    st.markdown(povzetek)
-                else:
-                    st.error("Povzetka trenutno ni mogoče pripraviti. Poskusite znova čez nekaj minut.")
+                pripravi_in_shrani(povezava, besedilo, prebrane, neprebrane)
+
+        pokazi_povzetek(povezava)
 
 st.divider()
 
 with st.expander("Ročno nalaganje dokumentacije"):
     datoteka = st.file_uploader("Izberite PDF, Word ali Excel", type=["pdf", "docx", "xlsx"])
     if datoteka is not None:
-        if datoteka.name.lower().endswith(".docx"):
-            besedilo = preberi_word(datoteka)
-        elif datoteka.name.lower().endswith(".xlsx"):
-            besedilo = preberi_excel(datoteka)
-        else:
-            besedilo = preberi_pdf(datoteka)
+        kljuc = "rocno:" + datoteka.name
+        besedilo = preberi_datoteko(datoteka.name, datoteka)
 
-        if not besedilo.strip():
+        if not besedilo or not besedilo.strip():
             st.error("V dokumentu ni besedila – verjetno je skeniran.")
-        elif st.button("Pripravi povzetek naložene datoteke"):
-            povzetek = naredi_povzetek(besedilo)
-            if povzetek:
-                st.markdown(povzetek)
-            else:
-                st.error("Povzetka trenutno ni mogoče pripraviti. Poskusite znova čez nekaj minut.")
+        elif kljuc not in st.session_state["povzetki"] and st.button("Pripravi povzetek naložene datoteke"):
+            pripravi_in_shrani(kljuc, besedilo, [], [])
+
+        pokazi_povzetek(kljuc)
