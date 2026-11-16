@@ -14,7 +14,7 @@ from google import genai
 
 load_dotenv()
 
-MODELI = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"]
+MODELI = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"]
 GLAVA = {"User-Agent": "Mozilla/5.0"}
 SLOVENSKI_CAS = ZoneInfo("Europe/Ljubljana")
 NAJVEC_VRSTIC_EXCEL = 300  # iz vsakega lista preberemo največ toliko vrstic
@@ -30,6 +30,8 @@ Rok dobave oziroma izvedbe:
 Plačilni pogoji:
 
 Če kakšnega podatka v dokumentaciji ni, napiši "ni navedeno". Ničesar si ne izmišljuj.
+Odgovor začni neposredno s prvim naslovom, brez uvodnega stavka in brez zaključka.
+Piši stvarno in neosebno, ne nagovarjaj bralca.
 
 Dokumentacija:
 """
@@ -209,7 +211,7 @@ def naredi_povzetek(besedilo):
 
     for model in MODELI:
         for poskus in range(1, 3):
-            sporocilo.info(f"AI bere dokumentacijo ... (model {model}, poskus {poskus}/2)")
+            sporocilo.info("Priprava povzetka v teku ...")
             try:
                 odgovor = client.models.generate_content(model=model, contents=NAVODILO + besedilo)
                 sporocilo.empty()
@@ -219,7 +221,7 @@ def naredi_povzetek(besedilo):
                 time.sleep(10)
 
     sporocilo.empty()
-    st.write("Zadnja napaka:", str(zadnja_napaka))
+    st.caption("Tehnične podrobnosti: " + str(zadnja_napaka))
     return None
 
 
@@ -236,7 +238,7 @@ st.session_state["beseda"] = st.session_state["beseda"]  # da si stran zapomni i
 
 if st.session_state["povezava"] == "":
     # Nič še ni izbrano: pokaži iskanje
-    st.subheader("🔎 Poišči odprte razpise")
+    st.subheader("🔎 Iskanje odprtih razpisov")
     beseda = st.text_input("Ključna beseda v nazivu naročila (npr. vzdrževanje)", key="beseda")
 
     if beseda:
@@ -260,7 +262,7 @@ else:
     # Razpis je izbran: skrij seznam in ponudi pot nazaj
     st.button("← Nazaj na iskanje", on_click=nazaj_na_iskanje)
 
-povezava = st.text_input("Prilepi povezavo do objave z enarocanje.si", key="povezava")
+povezava = st.text_input("Povezava do objave na enarocanje.si", key="povezava")
 
 if povezava:
     try:
@@ -270,7 +272,7 @@ if povezava:
         objava = None
 
     if objava is None:
-        st.error("Objave ni bilo mogoče prebrati. Preveri povezavo.")
+        st.error("Objave ni bilo mogoče prebrati. Preverite povezavo.")
     else:
         st.subheader(objava["naslov"])
         if objava["narocnik"]:
@@ -281,9 +283,9 @@ if povezava:
         url_dokumentacije = objava["razpisnaDokumentacijaURL"]
 
         if not url_dokumentacije:
-            st.warning("Dokumentacija ni objavljena na portalu. Naloži jo ročno spodaj.")
-        elif st.button("Naredi AI povzetek dokumentacije"):
-            with st.spinner("Prenašam in berem dokumentacijo ..."):
+            st.warning("Dokumentacija ni objavljena na portalu. Naložite jo ročno spodaj.")
+        elif st.button("Pripravi povzetek dokumentacije"):
+            with st.spinner("Prenos in branje dokumentacije v teku ..."):
                 try:
                     besedilo, prebrane, neprebrane = preberi_zip(url_dokumentacije)
                 except Exception as napaka:
@@ -291,22 +293,22 @@ if povezava:
                     besedilo, prebrane, neprebrane = "", [], []
 
             if neprebrane:
-                st.warning("Teh datotek nisem prebral, preglej jih sam: " + ", ".join(neprebrane))
+                st.warning("Te datoteke niso bile prebrane, preglejte jih sami: " + ", ".join(neprebrane))
 
             if not besedilo.strip():
-                st.error("Dokumentacije ni bilo mogoče prebrati. Prenesi jo ročno in jo naloži spodaj.")
+                st.error("Dokumentacije ni bilo mogoče prebrati. Prenesite jo ročno in jo naložite spodaj.")
             else:
                 st.write("**Prebrani dokumenti:**", ", ".join(prebrane))
                 povzetek = naredi_povzetek(besedilo)
                 if povzetek:
                     st.markdown(povzetek)
                 else:
-                    st.error("Vsi modeli so trenutno zasedeni. Poskusi čez nekaj minut.")
+                    st.error("Povzetka trenutno ni mogoče pripraviti. Poskusite znova čez nekaj minut.")
 
 st.divider()
 
-with st.expander("Ali naloži dokumentacijo ročno"):
-    datoteka = st.file_uploader("Izberi PDF, Word ali Excel", type=["pdf", "docx", "xlsx"])
+with st.expander("Ročno nalaganje dokumentacije"):
+    datoteka = st.file_uploader("Izberite PDF, Word ali Excel", type=["pdf", "docx", "xlsx"])
     if datoteka is not None:
         if datoteka.name.lower().endswith(".docx"):
             besedilo = preberi_word(datoteka)
@@ -317,9 +319,9 @@ with st.expander("Ali naloži dokumentacijo ročno"):
 
         if not besedilo.strip():
             st.error("V dokumentu ni besedila – verjetno je skeniran.")
-        elif st.button("Naredi povzetek naložene datoteke"):
+        elif st.button("Pripravi povzetek naložene datoteke"):
             povzetek = naredi_povzetek(besedilo)
             if povzetek:
                 st.markdown(povzetek)
             else:
-                st.error("Vsi modeli so trenutno zasedeni. Poskusi čez nekaj minut.")
+                st.error("Povzetka trenutno ni mogoče pripraviti. Poskusite znova čez nekaj minut.")
